@@ -1,0 +1,432 @@
+openapi: 3.1.0
+info:
+  title: 投档来源卷宗系统 API (Admission Evidence Dossier)
+  version: 1.0.0
+  description: >
+    围绕一条投档事实（fact_key = province_code + admission_year +
+    subject_category + school_code + major_group_code）建立卷宗，
+    汇集最多 5 个独立来源核验投档最高分，并按 as_of 封存不可变卷宗。
+
+    一致性规则：
+      * 同一来源只接受更大的 source_revision 作为当前值；迟到的旧修订留在证据链中（superseded=true），不能抢回当前值。
+      * 分数以最小 0.1 分的整数（score_tenths）保存，保留原始量表；量表与 fact key 期望量表不一致时标记 SCALE_CONFLICT，不做换算。
+      * 状态优先级：SCALE_CONFLICT > CONFLICT > SINGLE_SOURCE > NO_EVIDENCE；全部来源当前值一致且量表一致为 CONSISTENT。
+      * 抓取来源时逐项返回结果；单个来源失败不影响其他来源，HTTP 状态仍为 200。
+servers:
+  - url: http://localhost:8080/api/v1
+    description: 本地后端（端口由 API_PORT 控制，默认 8080）
+
+tags:
+  - name: dossiers
+    description: 卷宗与事实
+  - name: sources
+    description: 来源证据
+  - name: seals
+    description: 封存卷宗
+
+paths:
+  /dossiers:
+    get:
+      tags: [dossiers]
+      summary: 列出卷宗
+      operationId: listDossiers
+      responses:
+        '200':
+          description: 卷宗列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  dossiers:
+                    type: array
+                    items: { $ref: '#/components/schemas/DossierSummary' }
+    post:
+      tags: [dossiers]
+      summary: 为一条 fact key 创建卷宗（至多绑定 5 个来源）
+      operationId: createDossier
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateDossierRequest' }
+      responses:
+        '201':
+          description: 已创建
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DossierDetail' }
+        '409':
+          description: fact key 已存在卷宗
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
+        '400':
+          description: 参数错误（如来源超过 5 个）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
+
+  /dossiers/{dossierId}:
+    get:
+      tags: [dossiers]
+      summary: 获取卷宗当前视图（当前事实 + 各来源当前值 + 证据链 + 封存列表）
+      operationId: getDossier
+      parameters:
+        - $ref: '#/components/parameters/DossierId'
+        - name: as_of
+          in: query
+          description: 可选。按某个时刻重放卷宗视图（影响当前值与 freshness），不改变任何数据。
+          schema: { type: string, format: date-time }
+      responses:
+        '200':
+          description: 卷宗详情
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DossierDetail' }
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /dossiers/{dossierId}/sources/fetch:
+    post:
+      tags: [sources]
+      summary: >
+        抓取全部绑定来源并并入证据链。部分来源失败时仍返回 200，
+        results 中逐项给出 LOADED / SUPERSEDED / ERROR；已在证据链中的记录保留。
+      operationId: fetchSources
+      parameters:
+        - $ref: '#/components/parameters/DossierId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                asOf:
+                  type: string
+                  format: date-time
+                  description: 以该时刻抓取（仅接受 recorded_at <= asOf 的发布），缺省为当前时刻。
+      responses:
+        '200':
+          description: 逐项抓取结果（允许部分失败）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FetchReport' }
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /dossiers/{dossierId}/sources:
+    post:
+      tags: [sources]
+      summary: >
+        人工录入一条来源记录。量表不一致仍会保存（卷宗标记 SCALE_CONFLICT，不换算）；
+        旧 revision 保存但 superseded=true，不影响当前值。
+      operationId: addSourceRecord
+      parameters:
+        - $ref: '#/components/parameters/DossierId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ManualSourceRecord' }
+      responses:
+        '201':
+          description: 已录入证据链
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SourceRecordView' }
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '400':
+          description: 参数错误
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
+
+  /dossiers/{dossierId}/sources/{sourceId}/revisions:
+    get:
+      tags: [sources]
+      summary: 某来源在本卷宗中的完整证据链（含版本差异 deltaTenths）
+      operationId: getSourceRevisions
+      parameters:
+        - $ref: '#/components/parameters/DossierId'
+        - name: sourceId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: 证据链
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RevisionChain' }
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /dossiers/{dossierId}/seals:
+    get:
+      tags: [seals]
+      summary: 列出封存卷宗（hasNewerEvidence 表示封存后出现了新证据，即“过期卷宗”）
+      operationId: listSeals
+      parameters:
+        - $ref: '#/components/parameters/DossierId'
+      responses:
+        '200':
+          description: 封存列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  seals:
+                    type: array
+                    items: { $ref: '#/components/schemas/SealSummary' }
+        '404':
+          $ref: '#/components/responses/NotFound'
+    post:
+      tags: [seals]
+      summary: 按 as_of 封存不可变卷宗快照
+      operationId: createSeal
+      parameters:
+        - $ref: '#/components/parameters/DossierId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [asOf]
+              properties:
+                asOf: { type: string, format: date-time }
+      responses:
+        '201':
+          description: 已封存
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SealView' }
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 该 as_of 已封存
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
+
+  /dossiers/{dossierId}/seals/{sealId}:
+    get:
+      tags: [seals]
+      summary: 读取封存快照（内容永不变；hasNewerEvidence 为实时计算）
+      operationId: getSeal
+      parameters:
+        - $ref: '#/components/parameters/DossierId'
+        - name: sealId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 封存快照
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SealView' }
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+components:
+  parameters:
+    DossierId:
+      name: dossierId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+  responses:
+    NotFound:
+      description: 卷宗不存在
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ApiError' }
+  schemas:
+    FactKey:
+      type: object
+      required: [provinceCode, admissionYear, subjectCategory, schoolCode, majorGroupCode]
+      properties:
+        provinceCode: { type: string, example: '44', description: 省级行政区代码（44=广东，42=湖北） }
+        admissionYear: { type: integer, example: 2025 }
+        subjectCategory:
+          type: string
+          enum: [PHYSICS, HISTORY, ART_COMPOSITE]
+          description: PHYSICS=普通物理类，HISTORY=普通历史类，ART_COMPOSITE=艺术综合分
+        schoolCode: { type: string, example: '11113', description: 院校国标代码（11113=深圳职业技术大学，10834=武汉职业技术大学） }
+        majorGroupCode: { type: string, example: '203', description: 院校专业组代码 }
+    CreateDossierRequest:
+      type: object
+      required: [factKey, sourceIds]
+      properties:
+        factKey: { $ref: '#/components/schemas/FactKey' }
+        sourceIds:
+          type: array
+          maxItems: 5
+          items: { type: string }
+          description: 绑定的独立来源，至多 5 个
+    DossierSummary:
+      allOf:
+        - $ref: '#/components/schemas/FactKey'
+      type: object
+      properties:
+        dossierId: { type: string, format: uuid }
+        expectedScale: { $ref: '#/components/schemas/ScoreScale' }
+        status: { $ref: '#/components/schemas/DossierStatus' }
+        sourceCount: { type: integer }
+        createdAt: { type: string, format: date-time }
+    DossierDetail:
+      type: object
+      properties:
+        dossierId: { type: string, format: uuid }
+        factKey: { $ref: '#/components/schemas/FactKey' }
+        factKeyHash: { type: string, description: fact_key 规范拼接后的 sha256 }
+        expectedScale: { $ref: '#/components/schemas/ScoreScale' }
+        status: { $ref: '#/components/schemas/DossierStatus' }
+        asOf: { type: string, format: date-time }
+        sources:
+          type: array
+          items: { $ref: '#/components/schemas/SourceState' }
+        evidenceChain:
+          type: array
+          description: 本卷宗全部来源记录（含被取代的旧修订），按 recorded_at 升序
+          items: { $ref: '#/components/schemas/SourceRecordView' }
+        seals:
+          type: array
+          items: { $ref: '#/components/schemas/SealSummary' }
+    SourceState:
+      type: object
+      properties:
+        sourceId: { type: string }
+        sourceName: { type: string }
+        loadState:
+          type: string
+          enum: [OK, ERROR, MISSING]
+          description: 最近一次抓取的加载状态；MISSING=尚未抓取
+        errorCode: { type: string, nullable: true, description: 如 FACT_KEY_MISMATCH / SOURCE_UNAVAILABLE }
+        errorMessage: { type: string, nullable: true }
+        current:
+          oneOf:
+            - $ref: '#/components/schemas/SourceRecordView'
+            - type: 'null'
+        revisionCount: { type: integer }
+    SourceRecordView:
+      type: object
+      properties:
+        sourceId: { type: string }
+        sourceName: { type: string, nullable: true }
+        sourceRevision: { type: integer, minimum: 1 }
+        scoreTenths: { type: integer, description: 最小 0.1 分的整数（609.0 分记为 6090） }
+        scoreDisplay: { type: string, example: '609.0', description: scoreTenths/10 的展示值 }
+        scoreScale: { $ref: '#/components/schemas/ScoreScale' }
+        sourceDocNo: { type: string, description: 来源文号 }
+        effectiveFrom: { type: string, format: date }
+        effectiveTo: { type: string, format: date, nullable: true }
+        recordedAt: { type: string, format: date-time }
+        freshness: { $ref: '#/components/schemas/Freshness' }
+        contentHash: { type: string, description: sha256: 前缀的内容哈希 }
+        rawText: { type: string, description: 来源原文（抽屉展示） }
+        origin: { type: string, enum: [FETCH, MANUAL] }
+        superseded: { type: boolean, description: true=迟到旧修订，仅留证据链，不是当前值 }
+    ManualSourceRecord:
+      type: object
+      required: [sourceId, sourceRevision, scoreTenths, scoreScale, sourceDocNo, effectiveFrom, rawText]
+      properties:
+        sourceId: { type: string }
+        sourceRevision: { type: integer, minimum: 1 }
+        scoreTenths: { type: integer }
+        scoreScale: { $ref: '#/components/schemas/ScoreScale' }
+        sourceDocNo: { type: string }
+        effectiveFrom: { type: string, format: date }
+        effectiveTo: { type: string, format: date, nullable: true }
+        recordedAt: { type: string, format: date-time, nullable: true, description: 缺省为当前时刻 }
+        rawText: { type: string }
+    FetchReport:
+      type: object
+      properties:
+        dossierId: { type: string, format: uuid }
+        asOf: { type: string, format: date-time }
+        dossierStatus: { $ref: '#/components/schemas/DossierStatus' }
+        results:
+          type: array
+          items:
+            type: object
+            properties:
+              sourceId: { type: string }
+              outcome:
+                type: string
+                enum: [LOADED, SUPERSEDED, ERROR]
+                description: LOADED=新记录成为当前值；SUPERSEDED=旧修订已入证据链但不改变当前值；ERROR=该来源失败
+              record:
+                oneOf:
+                  - $ref: '#/components/schemas/SourceRecordView'
+                  - type: 'null'
+              errorCode: { type: string, nullable: true }
+              errorMessage: { type: string, nullable: true }
+    RevisionChain:
+      type: object
+      properties:
+        sourceId: { type: string }
+        revisions:
+          type: array
+          items:
+            allOf:
+              - $ref: '#/components/schemas/SourceRecordView'
+              - type: object
+                properties:
+                  deltaTenths:
+                    type: integer
+                    nullable: true
+                    description: 与上一修订的分差（tenths），首条为 null
+    SealSummary:
+      type: object
+      properties:
+        sealId: { type: string, format: uuid }
+        asOf: { type: string, format: date-time }
+        status: { $ref: '#/components/schemas/DossierStatus' }
+        sealedAt: { type: string, format: date-time }
+        contentHash: { type: string }
+        hasNewerEvidence: { type: boolean, description: 封存之后是否出现新证据（前端据此显示“过期卷宗”） }
+    SealView:
+      allOf:
+        - $ref: '#/components/schemas/SealSummary'
+      type: object
+      properties:
+        dossierId: { type: string, format: uuid }
+        factKey: { $ref: '#/components/schemas/FactKey' }
+        snapshot:
+          type: object
+          description: 封存时刻的不可变快照（status、各来源当前值、证据链哈希）
+          properties:
+            status: { $ref: '#/components/schemas/DossierStatus' }
+            sources:
+              type: array
+              items: { $ref: '#/components/schemas/SourceState' }
+            evidenceChain:
+              type: array
+              items: { $ref: '#/components/schemas/SourceRecordView' }
+    ScoreScale:
+      type: string
+      enum: [GAOKAO_750_TENTH, ART_COMPOSITE_TENTH]
+      description: GAOKAO_750_TENTH=普通类750分制（0.1分精度）；ART_COMPOSITE_TENTH=艺术综合分（0.1分精度）。两者不一致即 SCALE_CONFLICT，不换算。
+    Freshness:
+      type: string
+      enum: [FRESH, UPCOMING, EXPIRED]
+      description: FRESH=在有效期内；UPCOMING=effective_from 尚未到达；EXPIRED=已过 effective_to
+    DossierStatus:
+      type: string
+      enum: [NO_EVIDENCE, SINGLE_SOURCE, CONSISTENT, CONFLICT, SCALE_CONFLICT]
+      description: >
+        NO_EVIDENCE=无任何来源；SINGLE_SOURCE=仅一个来源有当前值；
+        CONSISTENT=≥2 个来源当前值一致且量表一致；
+        CONFLICT=当前值不一致；SCALE_CONFLICT=存在量表不一致（优先级最高）。
+    ApiError:
+      type: object
+      properties:
+        errorCode: { type: string, example: DOSSIER_NOT_FOUND }
+        message: { type: string }
+        details: { type: object, additionalProperties: true }

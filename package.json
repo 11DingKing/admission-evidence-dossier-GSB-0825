@@ -1,0 +1,16 @@
+{
+  "name": "admission-evidence-dossier",
+  "private": true,
+  "packageManager": "pnpm@10.28.0",
+  "scripts": {
+    "dev": "pnpm --filter @gsb/web dev",
+    "build": "pnpm --filter @gsb/web build",
+    "test": "pnpm --filter @gsb/web test",
+    "preview": "pnpm --filter @gsb/web preview"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  }
+}
