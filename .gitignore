@@ -1,0 +1,26 @@
+# Build output
+build/
+dist/
+node_modules/
+*.log
+*.tsbuildinfo
+
+# Gradle
+.gradle/
+backend/build/
+backend/.gradle/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# Env
+.env
+.env.local
+backend/.env
+frontend/.env
+frontend/.env.local
+
+# OS
+.DS_Store

@@ -1,0 +1,16 @@
+{
+  "name": "admission-evidence-dossier",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "test": "pnpm --filter frontend test",
+    "build": "pnpm --filter frontend build",
+    "backend:test": "./gradlew test",
+    "backend:bootJar": "./gradlew bootJar",
+    "frontend:install": "pnpm --filter frontend install",
+    "frontend:test": "pnpm --filter frontend test",
+    "frontend:build": "pnpm --filter frontend build",
+    "frontend:dev": "pnpm --filter frontend dev"
+  },
+  "packageManager": "pnpm@9.0.0"
+}

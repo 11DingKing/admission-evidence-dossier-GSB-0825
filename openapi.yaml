@@ -1,0 +1,264 @@
+openapi: 3.1.0
+info:
+  title: 投档来源卷宗系统 API
+  version: 1.0.0
+  description: >
+    围绕 fact_key 核验多来源投档数据，封存不可变卷宗。
+    fact_key = province_code + admission_year + subject_category + school_code + major_group_code。
+servers:
+  - url: http://localhost:8080/api
+tags:
+  - name: Dossiers
+  - name: Sources
+paths:
+  /dossiers:
+    post:
+      tags: [Dossiers]
+      summary: 为 fact_key 创建卷宗
+      operationId: createDossier
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateDossierRequest'
+      responses:
+        '201':
+          description: 已创建
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DossierResponse'
+    get:
+      tags: [Dossiers]
+      summary: 按 fact_key 查询卷宗列表
+      operationId: listDossiers
+      parameters:
+        - { name: provinceCode, in: query, required: true, schema: { type: string } }
+        - { name: admissionYear, in: query, required: true, schema: { type: integer } }
+        - { name: subjectCategory, in: query, required: true, schema: { type: string } }
+        - { name: schoolCode, in: query, required: true, schema: { type: string } }
+        - { name: majorGroupCode, in: query, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: 卷宗列表
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/DossierResponse' }
+  /dossiers/{dossierId}:
+    get:
+      tags: [Dossiers]
+      summary: 获取卷宗详情及来源证据
+      operationId: getDossier
+      parameters:
+        - { name: dossierId, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: 卷宗详情
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DossierResponse' }
+        '404': { description: 卷宗不存在 }
+  /dossiers/{dossierId}/seal:
+    post:
+      tags: [Dossiers]
+      summary: 按 as_of 封存不可变卷宗
+      operationId: sealDossier
+      parameters:
+        - { name: dossierId, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [asOf]
+              properties:
+                asOf: { type: string, format: date-time }
+      responses:
+        '200':
+          description: 已封存
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DossierResponse' }
+        '409':
+          description: 卷宗已封存或冲突
+  /dossiers/{dossierId}/sources/batch:
+    post:
+      tags: [Sources]
+      summary: 向指定卷宗批量提交来源（最多 5 条），逐项返回成功或错误
+      operationId: submitSourcesToDossier
+      parameters:
+        - { name: dossierId, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BatchSourceRequest'
+      responses:
+        '207':
+          description: 多状态返回（部分失败可能）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BatchSourceResponse' }
+  /sources/batch:
+    post:
+      tags: [Sources]
+      summary: 批量提交来源（最多 5 条），不校验卷宗归属
+      operationId: submitBatch
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BatchSourceRequest' }
+      responses:
+        '207':
+          description: 多状态返回
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BatchSourceResponse' }
+  /sources:
+    get:
+      tags: [Sources]
+      summary: 按 fact_key 查询当前有效来源
+      operationId: listSources
+      parameters:
+        - { name: provinceCode, in: query, required: true, schema: { type: string } }
+        - { name: admissionYear, in: query, required: true, schema: { type: integer } }
+        - { name: subjectCategory, in: query, required: true, schema: { type: string } }
+        - { name: schoolCode, in: query, required: true, schema: { type: string } }
+        - { name: majorGroupCode, in: query, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: 当前有效来源
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/SourceRecordResponse' }
+  /sources/history:
+    get:
+      tags: [Sources]
+      summary: 按 fact_key 查询全部来源修订历史（含旧 revision）
+      operationId: listSourceHistory
+      parameters:
+        - { name: provinceCode, in: query, required: true, schema: { type: string } }
+        - { name: admissionYear, in: query, required: true, schema: { type: integer } }
+        - { name: subjectCategory, in: query, required: true, schema: { type: string } }
+        - { name: schoolCode, in: query, required: true, schema: { type: string } }
+        - { name: majorGroupCode, in: query, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: 全部修订历史
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/SourceRecordResponse' }
+components:
+  schemas:
+    CreateDossierRequest:
+      type: object
+      required: [provinceCode, admissionYear, subjectCategory, schoolCode, majorGroupCode, expectedScale]
+      properties:
+        provinceCode: { type: string, example: "44" }
+        admissionYear: { type: integer, example: 2025 }
+        subjectCategory: { type: string, example: PHYSICS }
+        schoolCode: { type: string, example: "11113" }
+        majorGroupCode: { type: string, example: "001" }
+        expectedScale: { type: string, example: PHYSICS_750_T1 }
+    BatchSourceRequest:
+      type: object
+      required: [sources]
+      properties:
+        sources:
+          type: array
+          maxItems: 5
+          items: { $ref: '#/components/schemas/SourceRecordRequest' }
+    SourceRecordRequest:
+      type: object
+      required: [provinceCode, admissionYear, subjectCategory, schoolCode, majorGroupCode, sourceId, sourceRevision, scoreValue, scoreScale, effectiveFrom, recordedAt]
+      properties:
+        provinceCode: { type: string }
+        admissionYear: { type: integer }
+        subjectCategory: { type: string }
+        schoolCode: { type: string }
+        majorGroupCode: { type: string }
+        sourceId: { type: string }
+        sourceRevision: { type: integer, minimum: 1 }
+        scoreValue: { type: integer, description: 分数按 0.1 精度存为整数，609.0 => 6090 }
+        scoreScale: { type: string }
+        originalScoreText: { type: string, nullable: true }
+        effectiveFrom: { type: string, format: date-time }
+        effectiveTo: { type: string, format: date-time, nullable: true }
+        recordedAt: { type: string, format: date-time }
+        sourceDocumentNo: { type: string, nullable: true }
+        originalText: { type: string, nullable: true }
+    SourceRecordResponse:
+      type: object
+      properties:
+        sourceId: { type: string }
+        sourceRevision: { type: integer }
+        scoreValue: { type: integer }
+        scoreScale: { type: string }
+        originalScoreText: { type: string, nullable: true }
+        effectiveFrom: { type: string, format: date-time }
+        effectiveTo: { type: string, format: date-time, nullable: true }
+        recordedAt: { type: string, format: date-time }
+        sourceDocumentNo: { type: string, nullable: true }
+        originalText: { type: string, nullable: true }
+        contentHash: { type: string }
+        freshness: { type: string, enum: [FRESH, STALE, EXPIRED] }
+        isLatestRevision: { type: boolean }
+    DossierEntryResponse:
+      allOf:
+        - $ref: '#/components/schemas/SourceRecordResponse'
+        - type: object
+          properties:
+            sourceId: { type: string }
+    DossierResponse:
+      type: object
+      properties:
+        dossierId: { type: string }
+        provinceCode: { type: string }
+        admissionYear: { type: integer }
+        subjectCategory: { type: string }
+        schoolCode: { type: string }
+        majorGroupCode: { type: string }
+        expectedScale: { type: string }
+        status: { type: string, enum: [PENDING, CONSISTENT, CONFLICT, SCALE_CONFLICT] }
+        asOf: { type: string, format: date-time, nullable: true }
+        sealed: { type: boolean }
+        sealedAt: { type: string, format: date-time, nullable: true }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        expired: { type: boolean }
+        sources:
+          type: array
+          items: { $ref: '#/components/schemas/SourceRecordResponse' }
+        sealedEntries:
+          type: array
+          items: { $ref: '#/components/schemas/DossierEntryResponse' }
+    BatchSourceResponse:
+      type: object
+      properties:
+        accepted:
+          type: array
+          items: { $ref: '#/components/schemas/SourceRecordResponse' }
+        errors:
+          type: array
+          items: { $ref: '#/components/schemas/SourceError' }
+        totalCount: { type: integer }
+        successCount: { type: integer }
+        failureCount: { type: integer }
+        partialFailure: { type: boolean }
+    SourceError:
+      type: object
+      properties:
+        index: { type: integer }
+        sourceId: { type: string }
+        errorCode: { type: string, enum: [FACT_KEY_MISMATCH, DUPLICATE_REVISION] }
+        message: { type: string }
